@@ -154,10 +154,14 @@ public class SecurePreferences implements SharedPreferences {
         }
 
         this.useKeystore = useKeystore;
+        boolean isAliasInKeyStore=false;
+
         if (useKeystore) {
             KEY_ALIAS = context.getApplicationContext().getPackageName() + ".sp";
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+
+                    isAliasInKeyStore = KeyStoreProvider.isAliasInKeystore(KEY_ALIAS);
                     keyStoreProvider = new KeyStoreProvider(context, sLoggingEnabled, KEY_ALIAS);
                 } else {
                     throw new GeneralSecurityException("API Level to low for using KeyStore");
@@ -184,7 +188,7 @@ public class SecurePreferences implements SharedPreferences {
 
                 if (useKeystore) {
                     //see if we have a Key but no KeyStore to decrypt it
-                    handlePotentialKeyStoreLoss(keyAsString);
+                    handlePotentialKeyStoreLoss(keyAsString,isAliasInKeyStore);
                 }
 
                 if (keyAsString == null) {
@@ -226,9 +230,8 @@ public class SecurePreferences implements SharedPreferences {
                 //get additional Material to be added to the password and save it encrypted via the keystore, this makes a bruteforce harder
                 String additionalMaterial = "";
                 if (useKeystore) {
-
-                    handlePotentialKeyStoreLoss(password);
-                    String accessKey = generateAesKeyName(context, iterationCount, ".am" + sharedPrefFilename);
+                    handlePotentialKeyStoreLoss(password,isAliasInKeyStore);
+                    String accessKey = generateAesKeyName(context, iterationCount);
                     additionalMaterial = keyStoreProvider.rsaDecryptWithStrings(sharedPreferences.getString(accessKey, ""));
 
                     if (TextUtils.isEmpty(additionalMaterial)) {
@@ -236,12 +239,9 @@ public class SecurePreferences implements SharedPreferences {
                         String encryptedMaterial = keyStoreProvider.rsaEncryptWithStrings(additionalMaterial);
                         sharedPreferences.edit().putString(accessKey, encryptedMaterial).commit();
                     }
-
-                    keys = AesCbcWithIntegrity.generateKeyFromPassword(password + additionalMaterial, salt, iterationCount);
-
-                } else {
-                    keys = AesCbcWithIntegrity.generateKeyFromPassword(password, salt, iterationCount);
                 }
+
+                keys = AesCbcWithIntegrity.generateKeyFromPassword(password + additionalMaterial, salt, iterationCount);
 
                 if (keys == null) {
                     throw new GeneralSecurityException("Problem generating Key From Password");
@@ -253,17 +253,17 @@ public class SecurePreferences implements SharedPreferences {
                 throw new IllegalStateException(e);
             }
         }
-    }
+}
 
 
     /**
      * Handle potential loss of KeyStore due to Pin/Password change on device, will delete all values
      *
-     * @param testString test password or encryption String for existence
-     *
+     * @param testString            test password or encryption String for existence
+     * @param isAliasInKeyStore     is alias in keystore
      */
-    private void handlePotentialKeyStoreLoss(String testString) throws GeneralSecurityException {
-        if (!KeyStoreProvider.isAliasInKeystore(KEY_ALIAS) && !TextUtils.isEmpty(testString)) {
+    private void handlePotentialKeyStoreLoss(String testString, boolean isAliasInKeyStore) throws GeneralSecurityException {
+        if (!isAliasInKeyStore && !TextUtils.isEmpty(testString)) {
             //handle lockscreen password change
             destroyKeys();
             sharedPreferences.edit().clear().commit();
@@ -312,22 +312,7 @@ public class SecurePreferences implements SharedPreferences {
         return hashPrefKey(generatedKeyName.toString());
     }
 
-    /**
-     * Uses device and application values to generate the pref key for the encryption key
-     *
-     * @param context        should be ApplicationContext not Activity
-     * @param iterationCount The iteration count for the keys generation
-     * @param pepper         As differentiator for AesKeyNames
-     * @return String to be used as the AESkey Pref key
-     * @throws GeneralSecurityException if something goes wrong in generation
-     */
-    private String generateAesKeyName(Context context, int iterationCount, String pepper) throws GeneralSecurityException {
-        final String password = context.getPackageName() + pepper;
-        final byte[] salt = getDeviceSerialNumber(context).getBytes();
-        AesCbcWithIntegrity.SecretKeys generatedKeyName = AesCbcWithIntegrity.generateKeyFromPassword(password, salt, iterationCount);
 
-        return hashPrefKey(generatedKeyName.toString());
-    }
 
 
     /**
