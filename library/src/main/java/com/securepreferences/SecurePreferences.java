@@ -54,7 +54,16 @@ import java.util.Set;
  */
 public class SecurePreferences implements SharedPreferences {
 
+
     private static final int ORIGINAL_ITERATION_COUNT = 10000;
+
+    private static final boolean ORIGINAL_USE_KEYSTORE = false;
+
+    //Use for keyStore based encryption
+    private KeyStoreProvider keyStoreProvider;
+
+    //KeyStore Alias
+    private static String KEY_ALIAS;
 
     //the backing pref file
     private SharedPreferences sharedPreferences;
@@ -63,6 +72,8 @@ public class SecurePreferences implements SharedPreferences {
     private AesCbcWithIntegrity.SecretKeys keys;
 
     private static boolean sLoggingEnabled = false;
+
+    private boolean useKeystore;
 
     private static final String TAG = SecurePreferences.class.getName();
 
@@ -76,7 +87,7 @@ public class SecurePreferences implements SharedPreferences {
      * @param context should be ApplicationContext not Activity
      */
     public SecurePreferences(Context context) {
-        this(context, "", null);
+        this(context, "", null, ORIGINAL_USE_KEYSTORE);
     }
 
 
@@ -94,50 +105,108 @@ public class SecurePreferences implements SharedPreferences {
      * @param sharedPrefFilename name of the shared pref file. If null use the default shared prefs
      */
     public SecurePreferences(Context context, final String password, final String sharedPrefFilename) {
-        this(context, null, password, sharedPrefFilename, ORIGINAL_ITERATION_COUNT);
+        this(context, null, password, sharedPrefFilename, ORIGINAL_ITERATION_COUNT, ORIGINAL_USE_KEYSTORE);
+    }
+
+    /**
+     * @param context            should be ApplicationContext not Activity
+     * @param password           user password/code used to generate encryption key.
+     * @param sharedPrefFilename name of the shared pref file. If null use the default shared prefs
+     * @param useKeystore        should use additional KeyStore encryption
+     */
+    public SecurePreferences(Context context, final String password, final String sharedPrefFilename, boolean useKeystore) {
+        this(context, null, password, sharedPrefFilename, ORIGINAL_ITERATION_COUNT, useKeystore);
     }
 
 
     /**
+     * ä
+     *
      * @param context        should be ApplicationContext not Activity
      * @param iterationCount The iteration count for the keys generation
      */
     public SecurePreferences(Context context, final String password, final String sharedPrefFilename, int iterationCount) {
-        this(context, null, password, sharedPrefFilename, iterationCount);
+        this(context, null, password, sharedPrefFilename, iterationCount, ORIGINAL_USE_KEYSTORE);
     }
 
+    /**
+     * @param context        should be ApplicationContext not Activity
+     * @param iterationCount The iteration count for the keys generation
+     * @param useKeystore    should use additional KeyStore encryption
+     */
+    public SecurePreferences(Context context, final String password, final String sharedPrefFilename, int iterationCount, boolean useKeystore) {
+        this(context, null, password, sharedPrefFilename, iterationCount, useKeystore);
+    }
 
     /**
      * @param context            should be ApplicationContext not Activity
      * @param secretKey          that you've generated
      * @param sharedPrefFilename name of the shared pref file. If null use the default shared prefs
+     * @param useKeystore        should use additional KeyStore encryption
      */
-    public SecurePreferences(Context context, final AesCbcWithIntegrity.SecretKeys secretKey, final String sharedPrefFilename) {
-        this(context, secretKey, null, sharedPrefFilename, 0);
+    public SecurePreferences(Context context, final AesCbcWithIntegrity.SecretKeys secretKey, final String sharedPrefFilename, boolean useKeystore) {
+        this(context, secretKey, null, sharedPrefFilename, 0, useKeystore);
     }
 
-    private SecurePreferences(Context context, final AesCbcWithIntegrity.SecretKeys secretKey, final String password, final String sharedPrefFilename, int iterationCount) {
+    private SecurePreferences(Context context, final AesCbcWithIntegrity.SecretKeys secretKey, String password, final String sharedPrefFilename, int iterationCount, boolean useKeystore) {
         if (sharedPreferences == null) {
             sharedPreferences = getSharedPreferenceFile(context, sharedPrefFilename);
         }
+
+        this.useKeystore = useKeystore;
+        if (useKeystore) {
+            KEY_ALIAS = context.getApplicationContext().getPackageName() + ".sp";
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    keyStoreProvider = new KeyStoreProvider(context, sLoggingEnabled, KEY_ALIAS);
+                } else {
+                    throw new GeneralSecurityException("API Level to low for using KeyStore");
+                }
+            } catch (GeneralSecurityException e) {
+                if (sLoggingEnabled) {
+                    Log.e(TAG, "Error init using Keystore: " + e.getMessage());
+                }
+                throw new IllegalStateException(e);
+            }
+        }
+
 
         if (secretKey != null) {
             keys = secretKey;
         } else if (TextUtils.isEmpty(password)) {
             // Initialize or create encryption key
             try {
+
+
                 final String key = generateAesKeyName(context, iterationCount);
 
                 String keyAsString = sharedPreferences.getString(key, null);
+
+                if (useKeystore) {
+                    //see if we have a Key but no KeyStore to decrypt it
+                    handlePotentialKeyStoreLoss(keyAsString);
+                }
+
                 if (keyAsString == null) {
                     keys = AesCbcWithIntegrity.generateKey();
                     //saving new key
-                    boolean committed = sharedPreferences.edit().putString(key, keys.toString()).commit();
+                    boolean committed;
+                    if (useKeystore) {
+                        //save Key encrypted with KeyStore RSA
+                        committed = sharedPreferences.edit().putString(key, keyStoreProvider.rsaEncryptWithStrings(keys.toString())).commit();
+                    } else {
+                        committed = sharedPreferences.edit().putString(key, keys.toString()).commit();
+                    }
+
                     if (!committed) {
                         Log.w(TAG, "Key not committed to prefs");
                     }
                 } else {
-                    keys = AesCbcWithIntegrity.keys(keyAsString);
+                    if (useKeystore) {
+                        keys = AesCbcWithIntegrity.keys(keyStoreProvider.rsaDecryptWithStrings(keyAsString));
+                    } else {
+                        keys = AesCbcWithIntegrity.keys(keyAsString);
+                    }
                 }
 
                 if (keys == null) {
@@ -154,7 +223,25 @@ public class SecurePreferences implements SharedPreferences {
             //use the password to generate the key
             try {
                 final byte[] salt = getDeviceSerialNumber(context).getBytes();
-                keys = AesCbcWithIntegrity.generateKeyFromPassword(password, salt, iterationCount);
+                //get additional Material to be added to the password and save it encrypted via the keystore, this makes a bruteforce harder
+                String additionalMaterial = "";
+                if (useKeystore) {
+
+                    handlePotentialKeyStoreLoss(password);
+                    String accessKey = generateAesKeyName(context, iterationCount, ".am" + sharedPrefFilename);
+                    additionalMaterial = keyStoreProvider.rsaDecryptWithStrings(sharedPreferences.getString(accessKey, ""));
+
+                    if (TextUtils.isEmpty(additionalMaterial)) {
+                        additionalMaterial = AesCbcWithIntegrity.generateKey().toString();
+                        String encryptedMaterial = keyStoreProvider.rsaEncryptWithStrings(additionalMaterial);
+                        sharedPreferences.edit().putString(accessKey, encryptedMaterial).commit();
+                    }
+
+                    keys = AesCbcWithIntegrity.generateKeyFromPassword(password + additionalMaterial, salt, iterationCount);
+
+                } else {
+                    keys = AesCbcWithIntegrity.generateKeyFromPassword(password, salt, iterationCount);
+                }
 
                 if (keys == null) {
                     throw new GeneralSecurityException("Problem generating Key From Password");
@@ -165,6 +252,21 @@ public class SecurePreferences implements SharedPreferences {
                 }
                 throw new IllegalStateException(e);
             }
+        }
+    }
+
+
+    /**
+     * Handle potential loss of KeyStore due to Pin/Password change on device, will delete all values
+     *
+     * @param testString test password or encryption String for existence
+     *
+     */
+    private void handlePotentialKeyStoreLoss(String testString) throws GeneralSecurityException {
+        if (!KeyStoreProvider.isAliasInKeystore(KEY_ALIAS) && !TextUtils.isEmpty(testString)) {
+            //handle lockscreen password change
+            destroyKeys();
+            sharedPreferences.edit().clear().commit();
         }
     }
 
@@ -204,6 +306,23 @@ public class SecurePreferences implements SharedPreferences {
      */
     private String generateAesKeyName(Context context, int iterationCount) throws GeneralSecurityException {
         final String password = context.getPackageName();
+        final byte[] salt = getDeviceSerialNumber(context).getBytes();
+        AesCbcWithIntegrity.SecretKeys generatedKeyName = AesCbcWithIntegrity.generateKeyFromPassword(password, salt, iterationCount);
+
+        return hashPrefKey(generatedKeyName.toString());
+    }
+
+    /**
+     * Uses device and application values to generate the pref key for the encryption key
+     *
+     * @param context        should be ApplicationContext not Activity
+     * @param iterationCount The iteration count for the keys generation
+     * @param pepper         As differentiator for AesKeyNames
+     * @return String to be used as the AESkey Pref key
+     * @throws GeneralSecurityException if something goes wrong in generation
+     */
+    private String generateAesKeyName(Context context, int iterationCount, String pepper) throws GeneralSecurityException {
+        final String password = context.getPackageName() + pepper;
         final byte[] salt = getDeviceSerialNumber(context).getBytes();
         AesCbcWithIntegrity.SecretKeys generatedKeyName = AesCbcWithIntegrity.generateKeyFromPassword(password, salt, iterationCount);
 

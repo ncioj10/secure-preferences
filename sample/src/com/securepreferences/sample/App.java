@@ -7,7 +7,6 @@ import android.preference.PreferenceManager;
 import android.util.Log;
 
 import com.securepreferences.SecurePreferences;
-import com.securepreferences.sample.utils.TickTock;
 import com.tozny.crypto.android.AesCbcWithIntegrity;
 
 import java.security.GeneralSecurityException;
@@ -39,7 +38,7 @@ public class App extends Application {
     @DebugLog
     public SharedPreferences getSharedPreferences() {
         if(mSecurePrefs==null){
-            mSecurePrefs = new SecurePreferences(this, "", "my_prefs.xml");
+            mSecurePrefs = new SecurePreferences(this, "", "my_prefs.xml",false);
             SecurePreferences.setLoggingEnabled(true);
         }
         return mSecurePrefs;
@@ -54,7 +53,7 @@ public class App extends Application {
     public SharedPreferences getSharedPreferences1000() {
         try {
             AesCbcWithIntegrity.SecretKeys myKey = AesCbcWithIntegrity.generateKeyFromPassword(Build.SERIAL,AesCbcWithIntegrity.generateSalt(),1000);
-            return new SecurePreferences(this, myKey, "my_prefs_1000.xml");
+            return new SecurePreferences(this, myKey, "my_prefs_1000.xml",false);
         } catch (GeneralSecurityException e) {
             Log.e(TAG, "Failed to create custom key for SecurePreferences", e);
         }
@@ -70,7 +69,7 @@ public class App extends Application {
     @DebugLog
     public SecurePreferences getUserPinBasedSharedPreferences(String password){
         if(mUserPrefs==null) {
-            mUserPrefs = new SecurePreferences(this, password, "user_prefs.xml");
+            mUserPrefs = new SecurePreferences(this, password, "user_prefs.xml",false);
         }
         return mUserPrefs;
     }
